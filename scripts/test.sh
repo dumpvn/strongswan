@@ -4,7 +4,7 @@
 build_botan()
 {
 	# same revision used in the build recipe of the testing environment
-	BOTAN_REV=0881f2c33ff7 # 2.13.0 + amalgamation patch
+	BOTAN_REV=2.14.0
 	BOTAN_DIR=$DEPS_BUILD_DIR/botan
 
 	if test -d "$BOTAN_DIR"; then
@@ -37,7 +37,7 @@ build_botan()
 
 build_wolfssl()
 {
-	WOLFSSL_REV=87859f9e810b # v4.3.0-stable + IBM Z patch
+	WOLFSSL_REV=v4.4.0-stable
 	WOLFSSL_DIR=$DEPS_BUILD_DIR/wolfssl
 
 	if test -d "$WOLFSSL_DIR"; then
@@ -48,9 +48,12 @@ build_wolfssl()
 
 	WOLFSSL_CFLAGS="-DWOLFSSL_PUBLIC_MP -DWOLFSSL_DES_ECB"
 	WOLFSSL_CONFIG="--prefix=$DEPS_PREFIX
+					--disable-crypttests --disable-examples
 					--enable-keygen --enable-rsapss --enable-aesccm
 					--enable-aesctr --enable-des3 --enable-camellia
-					--enable-curve25519 --enable-ed25519"
+					--enable-curve25519 --enable-ed25519
+					--enable-curve448 --enable-ed448
+					--enable-sha3 --enable-shake256"
 
 	git clone https://github.com/wolfSSL/wolfssl.git $WOLFSSL_DIR &&
 	cd $WOLFSSL_DIR &&
@@ -65,7 +68,7 @@ build_wolfssl()
 
 build_tss2()
 {
-	TSS2_REV=2.3.3
+	TSS2_REV=2.4.1
 	TSS2_PKG=tpm2-tss-$TSS2_REV
 	TSS2_DIR=$DEPS_BUILD_DIR/$TSS2_PKG
 	TSS2_SRC=https://github.com/tpm2-software/tpm2-tss/releases/download/$TSS2_REV/$TSS2_PKG.tar.gz
@@ -113,12 +116,8 @@ gcrypt)
 botan)
 	CONFIG="--disable-defaults --enable-pki --enable-botan --enable-pem"
 	export TESTS_PLUGINS="test-vectors pem botan!"
-	# we can't use the old package that comes with Ubuntu so we build from
-	# the current master until 2.8.0 is released and then probably switch to
-	# that unless we need newer features (at least 2.7.0 plus PKCS#1 patch is
-	# currently required)
 	DEPS=""
-	if test "$1" = "deps"; then
+	if test "$1" = "build-deps"; then
 		build_botan
 	fi
 	;;
@@ -127,7 +126,7 @@ wolfssl)
 	export TESTS_PLUGINS="test-vectors pem wolfssl!"
 	# build with custom options to enable all the features the plugin supports
 	DEPS=""
-	if test "$1" = "deps"; then
+	if test "$1" = "build-deps"; then
 		build_wolfssl
 	fi
 	;;
@@ -153,13 +152,19 @@ all|coverage|sonarcloud)
 		# not actually required but configure checks for it
 		DEPS="$DEPS lcov"
 	fi
+	# Botan requires GCC 5.0, so disable it on Ubuntu 16.04
+	if test -n "$UBUNTU_XENIAL"; then
+		CONFIG="$CONFIG --disable-botan"
+	fi
 	DEPS="$DEPS libcurl4-gnutls-dev libsoup2.4-dev libunbound-dev libldns-dev
 		  libmysqlclient-dev libsqlite3-dev clearsilver-dev libfcgi-dev
 		  libpcsclite-dev libpam0g-dev binutils-dev libnm-dev libgcrypt20-dev
 		  libjson-c-dev iptables-dev python-pip libtspi-dev libsystemd-dev"
 	PYDEPS="tox"
-	if test "$1" = "deps"; then
-		build_botan
+	if test "$1" = "build-deps"; then
+		if test -z "$UBUNTU_XENIAL"; then
+			build_botan
+		fi
 		build_wolfssl
 		build_tss2
 	fi
@@ -199,6 +204,14 @@ win*)
 		CC="$CCACHE i686-w64-mingw32-gcc"
 		;;
 	esac
+	;;
+android)
+	DEPS="$DEPS openjdk-8-jdk"
+	if test "$1" = "deps"; then
+		git clone git://git.strongswan.org/android-ndk-boringssl.git -b ndk-static \
+			src/frontends/android/app/src/main/jni/openssl
+	fi
+	TARGET=distdir
 	;;
 osx)
 	# this causes a false positive in ip-packet.c since Xcode 8.3
@@ -317,8 +330,8 @@ lgtm)
 			-H 'Accept: application/json' \
 			-H "Authorization: Bearer ${LGTM_TOKEN}" > lgtm.res || exit $?
 		lgtm_check_url=$(jq -r '."task-result-url"' lgtm.res)
-		if [ "$lgtm_check_url" = "null" ]; then
-			cat lgtm.res | jq
+		if [ -z "$lgtm_check_url" -o "$lgtm_check_url" = "null" ]; then
+			cat lgtm.res
 			exit 1
 		fi
 		lgtm_url=$(jq -r '."task-result"."results-url"' lgtm.res)
@@ -358,7 +371,8 @@ lgtm)
 	;;
 esac
 
-if test "$1" = "deps"; then
+case "$1" in
+deps)
 	case "$TRAVIS_OS_NAME" in
 	linux)
 		sudo apt-get update -qq && \
@@ -374,12 +388,17 @@ if test "$1" = "deps"; then
 		;;
 	esac
 	exit $?
-fi
-
-if test "$1" = "pydeps"; then
+	;;
+pydeps)
 	test -z "$PYDEPS" || pip -q install --user $PYDEPS
 	exit $?
-fi
+	;;
+build-deps)
+	exit
+	;;
+*)
+	;;
+esac
 
 CONFIG="$CONFIG
 	--disable-dependency-tracking
@@ -437,6 +456,12 @@ sonarcloud)
 		-Dsonar.cfamily.cache.path=$HOME/.sonar-cache \
 		-Dsonar.cfamily.build-wrapper-output=bw-output || exit $?
 	rm -r bw-output .scannerwork
+	;;
+android)
+	rm -r strongswan-*
+	cd src/frontends/android
+	echo "$ ./gradlew build"
+	NDK_CCACHE=ccache ./gradlew build
 	;;
 *)
 	;;
